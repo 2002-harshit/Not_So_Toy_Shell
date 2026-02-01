@@ -19,9 +19,19 @@ fn main() {
                     stdin_buffer.clear();
                     continue;
                 }
-                match trimmed_buffer {
+                let command_result = trimmed_buffer.split_once(" ");
+                let command;
+                let mut args = "";
+                if command_result.is_some() {
+                    command = command_result.unwrap().0;
+                    args = command_result.unwrap().1;
+                } else {
+                    command = trimmed_buffer;
+                }
+                match command {
                     "exit" => break,
-                    _ => println!("{}: command not found", stdin_buffer.trim()),
+                    "echo" => println!("{}", args),
+                    _ => println!("{}: command not found", trimmed_buffer),
                 }
                 stdin_buffer.clear();
             }
