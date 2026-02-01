@@ -1,5 +1,19 @@
 use std::io::{BufRead, Write, stdout};
 
+fn handle_type_command(args: &Vec<&str>) {
+    for arg in args {
+        if is_builtin(arg) {
+            println!("{} is a shell builtin", arg);
+        } else {
+            println!("{}: not found", arg);
+        }
+    }
+}
+
+fn is_builtin(command: &str) -> bool {
+    command == "exit" || command == "echo" || command == "type"
+}
+
 fn main() {
     let stdin = std::io::stdin();
     let mut stdin_handle = stdin.lock();
@@ -19,18 +33,16 @@ fn main() {
                     stdin_buffer.clear();
                     continue;
                 }
-                let command_result = trimmed_buffer.split_once(" ");
-                let command;
-                let mut args = "";
-                if command_result.is_some() {
-                    command = command_result.unwrap().0;
-                    args = command_result.unwrap().1;
-                } else {
-                    command = trimmed_buffer;
-                }
+                let mut parts = trimmed_buffer.split_whitespace();
+                let command = parts.next().unwrap();
+                let args = parts.collect::<Vec<&str>>();
                 match command {
                     "exit" => break,
-                    "echo" => println!("{}", args),
+                    "echo" => println!("{}", args.join(" ")),
+                    "type" => match &args[..] {
+                        [_, ..] => handle_type_command(&args),
+                        _ => {}
+                    },
                     _ => println!("{}: command not found", trimmed_buffer),
                 }
                 stdin_buffer.clear();
