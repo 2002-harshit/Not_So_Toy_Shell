@@ -19,7 +19,10 @@ fn main() {
                     stdin_buffer.clear();
                     continue;
                 }
-                println!("{}: command not found", stdin_buffer.trim());
+                match trimmed_buffer {
+                    "exit" => break,
+                    _ => println!("{}: command not found", stdin_buffer.trim()),
+                }
                 stdin_buffer.clear();
             }
             Err(e) => {
