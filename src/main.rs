@@ -6,7 +6,7 @@ use std::{
         fd::AsFd,
         unix::{ffi::OsStrExt, fs::PermissionsExt},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::exit,
 };
 
@@ -25,6 +25,7 @@ impl Commands {
     const EXIT: &str = "exit";
     const TYPE: &str = "type";
     const PWD: &str = "pwd";
+    const CD: &str = "cd";
 }
 
 const BUILTINS: [&str; 4] = [
@@ -66,6 +67,19 @@ fn is_command_in_paths_env(command: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn handle_cd_command(path: &str) {
+    let path = Path::new(path);
+    if !path.is_dir() {
+        println!("cd: {}: No such file or directory", path.display());
+    }
+    if path.is_absolute() {
+        match env::set_current_dir(path) {
+            Ok(_) => {}
+            Err(_) => println!("cd: {}: No such file or directory", path.display()),
+        }
+    }
 }
 
 fn handle_non_builtins(command: &str, args: &[&str]) {
@@ -177,6 +191,11 @@ fn main() {
                             Ok(c) => println!("{}", c.display()),
                             Err(e) => eprintln!("Error with pwd {}", e),
                         },
+                        Commands::CD => {
+                            if args.len() > 0 {
+                                handle_cd_command(args[0])
+                            }
+                        }
                         _ => handle_non_builtins(command, &args),
                     }
                 }
