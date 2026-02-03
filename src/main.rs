@@ -73,6 +73,7 @@ fn handle_cd_command(path: &str) {
     let path = Path::new(path);
     if !path.is_dir() {
         println!("cd: {}: No such file or directory", path.display());
+        return;
     }
     if path.is_absolute() {
         match env::set_current_dir(path) {
