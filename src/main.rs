@@ -27,12 +27,14 @@ impl Commands {
     const PWD: &str = "pwd";
 }
 
-const BUILTINS: &[&str] = &[
+const BUILTINS: [&str; 4] = [
     Commands::ECHO,
     Commands::EXIT,
     Commands::TYPE,
     Commands::PWD,
 ];
+
+const HANDLED_SIGNALS: [Signal; 3] = [Signal::SIGTTOU, Signal::SIGTTIN, Signal::SIGINT];
 
 fn handle_type_command(args: &[&str]) {
     for arg in args {
@@ -77,8 +79,9 @@ fn handle_non_builtins(command: &str, args: &[&str]) {
                     SigSet::empty(),
                 );
                 unsafe {
-                    let _ = sigaction(Signal::SIGTTOU, &sa);
-                    let _ = sigaction(Signal::SIGTTIN, &sa);
+                    for signal in HANDLED_SIGNALS {
+                        let _ = sigaction(signal, &sa);
+                    }
                 }
                 let pid = getpid().as_raw();
                 if let Err(e) = setpgid(Pid::from_raw(0), Pid::from_raw(0)) {
@@ -121,7 +124,10 @@ fn handle_non_builtins(command: &str, args: &[&str]) {
                 let std_in_fd = stdin.as_fd();
                 let _ = setpgid(child, child);
                 let _ = tcsetpgrp(std_in_fd, child);
-                let _ = waitpid(child, None);
+                match waitpid(child, None) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("Waitpid error: {}(Code: {})", e.desc(), e as i32),
+                }
                 let _ = tcsetpgrp(std_in_fd, getpgrp());
             }
             Err(e) => {
@@ -141,8 +147,9 @@ fn main() {
         SigSet::empty(),
     );
     unsafe {
-        let _ = sigaction(Signal::SIGTTOU, &sa);
-        let _ = sigaction(Signal::SIGTTIN, &sa);
+        for signal in HANDLED_SIGNALS {
+            let _ = sigaction(signal, &sa);
+        }
     }
     let stdin = std::io::stdin();
     let mut stdin_handle = stdin.lock();
@@ -166,7 +173,10 @@ fn main() {
                         Commands::EXIT => break,
                         Commands::ECHO => println!("{}", args.join(" ")),
                         Commands::TYPE => handle_type_command(&args),
-                        Commands::PWD => {}
+                        Commands::PWD => match env::current_dir() {
+                            Ok(c) => println!("{}", c.display()),
+                            Err(e) => eprintln!("Error with pwd {}", e),
+                        },
                         _ => handle_non_builtins(command, &args),
                     }
                 }
