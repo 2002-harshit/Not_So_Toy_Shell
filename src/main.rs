@@ -1,12 +1,12 @@
 use std::{
-    env,
-    ffi::CString,
+    env::{self, home_dir},
+    ffi::{CString, OsStr},
     io::{BufRead, Write, stdin, stdout},
     os::{
         fd::AsFd,
         unix::{ffi::OsStrExt, fs::PermissionsExt},
     },
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::exit,
 };
 
@@ -70,15 +70,20 @@ fn is_command_in_paths_env(command: &str) -> Option<PathBuf> {
 }
 
 fn handle_cd_command(path: &str) {
-    let path = Path::new(path);
-    if !path.is_dir() {
-        println!("cd: {}: No such file or directory", path.display());
-        return;
-    }
-    if path.is_absolute() {
-        match env::set_current_dir(path) {
-            Ok(_) => {}
-            Err(_) => println!("cd: {}: No such file or directory", path.display()),
+    let path = if path == "~" {
+        env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    } else {
+        PathBuf::from(path)
+    };
+    if let Err(e) = env::set_current_dir(&path) {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                println!("cd: {}: No such file or directory", path.display())
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                println!("cd: {}: Permission denied", path.display());
+            }
+            _ => println!("cd: {}: {}", path.display(), e),
         }
     }
 }
@@ -192,11 +197,7 @@ fn main() {
                             Ok(c) => println!("{}", c.display()),
                             Err(e) => eprintln!("Error with pwd {}", e),
                         },
-                        Commands::CD => {
-                            if args.len() > 0 {
-                                handle_cd_command(args[0])
-                            }
-                        }
+                        Commands::CD => handle_cd_command(args.first().unwrap_or(&"~")),
                         _ => handle_non_builtins(command, &args),
                     }
                 }
