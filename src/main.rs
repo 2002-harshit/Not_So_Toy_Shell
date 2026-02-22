@@ -294,7 +294,7 @@ fn tokenize(input: &str) -> Vec<String> {
 
     while let Some(c) = characters.next() {
         match c {
-            '\\' => is_escaped = true,
+            '\\' if !is_escaped => is_escaped = true,
             '\n' => {}
             '\'' if !(is_escaped || in_double_quote) => {
                 in_single_quote = !in_single_quote;
