@@ -299,7 +299,7 @@ fn tokenize(input: &str) -> Vec<String> {
             '\'' if !(is_escaped || in_double_quote) => {
                 in_single_quote = !in_single_quote;
             }
-            '\"' if !is_escaped => {
+            '\"' if !(is_escaped || in_single_quote) => {
                 in_double_quote = !in_double_quote;
             }
             ' ' | '\t' if !(is_escaped || in_single_quote || in_double_quote) => {
