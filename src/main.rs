@@ -290,18 +290,19 @@ fn tokenize(input: &str) -> Vec<String> {
     let mut is_escaped = false;
     let mut characters = input.chars().peekable();
 
-    // println!("Chars: {:?}", characters);
+    println!("Chars: {:?}", characters);
 
     while let Some(c) = characters.next() {
         match c {
+            '\\' => is_escaped = true,
             '\n' => {}
-            '\'' if !in_double_quote => {
+            '\'' if !(is_escaped || in_double_quote) => {
                 in_single_quote = !in_single_quote;
             }
-            '\"' => {
+            '\"' if !is_escaped => {
                 in_double_quote = !in_double_quote;
             }
-            ' ' | '\t' if !(in_single_quote || in_double_quote) => {
+            ' ' | '\t' if !(is_escaped || in_single_quote || in_double_quote) => {
                 if !current_token.is_empty() {
                     tokens.push(current_token);
                     current_token = String::new();
@@ -309,6 +310,7 @@ fn tokenize(input: &str) -> Vec<String> {
             }
             _ => {
                 current_token.push(c);
+                is_escaped = false;
             }
         }
     }
@@ -316,6 +318,6 @@ fn tokenize(input: &str) -> Vec<String> {
     if !current_token.is_empty() {
         tokens.push(current_token);
     }
-    // println!("Tokens: {:?}", tokens);
+    println!("Tokens: {:?}", tokens);
     tokens
 }
