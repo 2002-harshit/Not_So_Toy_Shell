@@ -290,7 +290,7 @@ fn tokenize(input: &str) -> Vec<String> {
     let mut is_escaped = false;
     let mut characters = input.chars().peekable();
 
-    println!("Chars: {:?}", characters);
+    // println!("Chars: {:?}", characters);
 
     while let Some(c) = characters.next() {
         match c {
@@ -318,6 +318,6 @@ fn tokenize(input: &str) -> Vec<String> {
     if !current_token.is_empty() {
         tokens.push(current_token);
     }
-    println!("Tokens: {:?}", tokens);
+    // println!("Tokens: {:?}", tokens);
     tokens
 }
