@@ -1,0 +1,2 @@
+# Some Gotchas
+- IF you ingnore a singal, you still recieve that signal but the effect of that signal is ignored, and if this signal is received in mid of a sys call, that call might be interrupted, and yiu may get EINTR.

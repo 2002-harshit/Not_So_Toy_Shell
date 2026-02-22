@@ -1,18 +1,23 @@
 use std::{
-    env::{self, home_dir},
-    ffi::{CString, OsStr},
-    io::{BufRead, Write, stdin, stdout},
+    env::{self},
+    ffi::CString,
+    io::{BufRead, Write, stdout},
     os::{
         fd::AsFd,
         unix::{ffi::OsStrExt, fs::PermissionsExt},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::exit,
 };
 
 use nix::{
+    errno::Errno,
     sys::{
-        signal::{SaFlags, SigAction, SigSet, Signal, sigaction},
+        signal::{
+            SaFlags, SigAction, SigSet,
+            Signal::{self, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU},
+            sigaction,
+        },
         wait::waitpid,
     },
     unistd::{ForkResult, Pid, execv, fork, getpgrp, getpid, setpgid, tcsetpgrp},
@@ -28,20 +33,21 @@ impl Commands {
     const CD: &str = "cd";
 }
 
-const BUILTINS: [&str; 4] = [
+const BUILTINS: [&str; 5] = [
     Commands::ECHO,
     Commands::EXIT,
     Commands::TYPE,
     Commands::PWD,
+    Commands::CD,
 ];
 
-const HANDLED_SIGNALS: [Signal; 3] = [Signal::SIGTTOU, Signal::SIGTTIN, Signal::SIGINT];
+const HANDLED_SIGNALS: [Signal; 5] = [SIGTTOU, SIGTTIN, SIGINT, SIGQUIT, SIGTSTP];
 
-fn handle_type_command(args: &[&str]) {
+fn handle_type_command(args: &[String]) {
     for arg in args {
         if is_builtin(arg) {
             println!("{} is a shell builtin", arg);
-        } else if let Some(full_path) = is_command_in_paths_env(*arg) {
+        } else if let Some(full_path) = is_command_in_paths_env(arg.as_str()) {
             println!("{} is {}", arg, full_path.display());
         } else {
             println!("{}: not found", arg);
@@ -70,10 +76,20 @@ fn is_command_in_paths_env(command: &str) -> Option<PathBuf> {
 }
 
 fn handle_cd_command(path: &str) {
-    let path = if path == "~" {
-        env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    let old_pwd = env::current_dir().ok();
+    let external_path;
+    let path = if path == "-" {
+        external_path = env::var_os("OLDPWD")
+            .map(|home| PathBuf::from(home))
+            .unwrap_or_default();
+        external_path.as_path()
+    } else if path == "~" {
+        external_path = env::var_os("HOME")
+            .map(|home| PathBuf::from(home))
+            .unwrap_or_default();
+        external_path.as_path()
     } else {
-        PathBuf::from(path)
+        Path::new(path)
     };
     if let Err(e) = env::set_current_dir(&path) {
         match e.kind() {
@@ -85,10 +101,26 @@ fn handle_cd_command(path: &str) {
             }
             _ => println!("cd: {}: {}", path.display(), e),
         }
+    } else {
+        if let Some(old) = old_pwd {
+            unsafe {
+                env::set_var("OLDPWD", old);
+            }
+        }
+        if let Ok(new) = env::current_dir() {
+            unsafe {
+                env::set_var("PWD", new);
+            }
+        }
     }
 }
 
-fn handle_non_builtins(command: &str, args: &[&str]) {
+fn handle_non_builtins(
+    shell_pgid: Pid,
+    tty: std::os::fd::BorrowedFd<'_>,
+    command: &str,
+    args: &[String],
+) {
     if let Some(full_path) = is_command_in_paths_env(command) {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
@@ -104,26 +136,43 @@ fn handle_non_builtins(command: &str, args: &[&str]) {
                     }
                 }
                 let pid = getpid().as_raw();
-                if let Err(e) = setpgid(Pid::from_raw(0), Pid::from_raw(0)) {
-                    eprintln!(
-                        "Pid: {}, setpgid failed: {}(Code: {})",
-                        pid,
-                        e.desc(),
-                        e as i32
-                    );
-                    exit(1);
+                match setpgid(Pid::from_raw(0), Pid::from_raw(0)) {
+                    Ok(_) | Err(nix::errno::Errno::EACCES) | Err(nix::errno::Errno::EINVAL) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "Pid: {}, setpgid failed: {}(Code: {})",
+                            pid,
+                            e.desc(),
+                            e as i32
+                        );
+                        exit(1);
+                    }
                 }
-                let _ = tcsetpgrp(stdin().as_fd(), Pid::from_raw(pid));
-                //* a new process group is created which has just the command and the pgid is same as pid of the child */
-                let full_path = CString::new(full_path.as_os_str().as_bytes()).unwrap_or_default();
-                if full_path.is_empty() {
-                    eprintln!("Pid: {}, Cannot get the executible path: {}", pid, command);
-                    exit(1);
-                }
+                let full_path = match CString::new(full_path.as_os_str().as_bytes()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        eprintln!("Pid: {}, invalid executable path (contains NUL)", pid);
+                        exit(1);
+                    }
+                };
                 let mut args_for_new_proc = Vec::with_capacity(args.len() + 1);
-                args_for_new_proc.push(CString::new(command.as_bytes()).unwrap_or_default());
+                let argv0 = match CString::new(command.as_bytes()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        eprintln!("Pid: {}, invalid argv[0]", pid);
+                        exit(1);
+                    }
+                };
+                args_for_new_proc.push(argv0);
                 for arg in args {
-                    args_for_new_proc.push(CString::new(arg.as_bytes()).unwrap_or_default());
+                    let other_argv = match CString::new(arg.as_bytes()) {
+                        Ok(c) => c,
+                        Err(_) => {
+                            eprintln!("Pid: {}, invalid argument (contains NUL)", pid);
+                            exit(1);
+                        }
+                    };
+                    args_for_new_proc.push(other_argv);
                 }
                 match execv(&full_path, &args_for_new_proc) {
                     Ok(_) => unreachable!(),
@@ -140,15 +189,36 @@ fn handle_non_builtins(command: &str, args: &[&str]) {
                 }
             }
             Ok(ForkResult::Parent { child }) => {
-                let stdin = stdin();
-                let std_in_fd = stdin.as_fd();
-                let _ = setpgid(child, child);
-                let _ = tcsetpgrp(std_in_fd, child);
-                match waitpid(child, None) {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("Waitpid error: {}(Code: {})", e.desc(), e as i32),
+                match setpgid(child, child) {
+                    Ok(_) | Err(nix::errno::Errno::EACCES) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(e) => {
+                        eprintln!("Parent setpgid failed: {}(Code: {})", e.desc(), e as i32);
+                    }
                 }
-                let _ = tcsetpgrp(std_in_fd, getpgrp());
+                if let Err(e) = tcsetpgrp(tty, child) {
+                    eprintln!(
+                        "Setting child as foreground process group failed: {} (Code: {})",
+                        e.desc(),
+                        e as i32
+                    );
+                }
+                loop {
+                    match waitpid(child, None) {
+                        Ok(_) => break,
+                        Err(Errno::EINTR) => {}
+                        Err(e) => {
+                            eprintln!("Waitpid error: {}(Code: {})", e.desc(), e as i32);
+                            break;
+                        }
+                    }
+                }
+                if let Err(e) = tcsetpgrp(tty, shell_pgid) {
+                    eprintln!(
+                        "Setting parent as foreground process group failed: {} (Code: {})",
+                        e.desc(),
+                        e as i32
+                    );
+                }
             }
             Err(e) => {
                 eprintln!("Command execution failed: {}(Code: {})", e.desc(), e as i32);
@@ -171,6 +241,7 @@ fn main() {
             let _ = sigaction(signal, &sa);
         }
     }
+    let shell_pgid = getpgrp();
     let stdin = std::io::stdin();
     let mut stdin_handle = stdin.lock();
     let mut stdin_buffer = String::new();
@@ -184,11 +255,10 @@ fn main() {
         match stdin_handle.read_line(&mut stdin_buffer) {
             Ok(0) => break,
             Ok(_) => {
-                let trimmed_buffer = stdin_buffer.trim();
-                if !trimmed_buffer.is_empty() {
-                    let mut parts = trimmed_buffer.split_whitespace();
-                    let command = parts.next().unwrap();
-                    let args = parts.collect::<Vec<&str>>();
+                let tokens = tokenize(&stdin_buffer);
+                if !tokens.is_empty() {
+                    let command = tokens[0].as_str();
+                    let args = &tokens[1..];
                     match command {
                         Commands::EXIT => break,
                         Commands::ECHO => println!("{}", args.join(" ")),
@@ -197,8 +267,10 @@ fn main() {
                             Ok(c) => println!("{}", c.display()),
                             Err(e) => eprintln!("Error with pwd {}", e),
                         },
-                        Commands::CD => handle_cd_command(args.first().unwrap_or(&"~")),
-                        _ => handle_non_builtins(command, &args),
+                        Commands::CD => {
+                            handle_cd_command(args.first().map(|s| s.as_str()).unwrap_or(&"~"))
+                        }
+                        _ => handle_non_builtins(shell_pgid, stdin_handle.as_fd(), command, &args),
                     }
                 }
                 stdin_buffer.clear();
@@ -208,4 +280,39 @@ fn main() {
             }
         }
     }
+}
+
+fn tokenize(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current_token = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut is_escaped = false;
+    let mut characters = input.chars().peekable();
+
+    // println!("Chars: {:?}", characters);
+
+    while let Some(c) = characters.next() {
+        match c {
+            '\n' => {}
+            '\'' => {
+                in_single_quote = !in_single_quote;
+            }
+            ' ' | '\t' if !in_single_quote => {
+                if !current_token.is_empty() {
+                    tokens.push(current_token);
+                    current_token = String::new();
+                }
+            }
+            _ => {
+                current_token.push(c);
+            }
+        }
+    }
+
+    if !current_token.is_empty() {
+        tokens.push(current_token);
+    }
+    // println!("Tokens: {:?}", tokens);
+    tokens
 }
