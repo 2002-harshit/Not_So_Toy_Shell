@@ -1,3 +1,18 @@
+mod lexer;
+use nix::{
+    errno::Errno,
+    fcntl::OFlag,
+    sys::{
+        signal::{
+            SaFlags, SigAction, SigSet,
+            Signal::{self, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU},
+            sigaction,
+        },
+        stat::Mode,
+        wait::waitpid,
+    },
+    unistd::{ForkResult, Pid, execv, fork, getpgrp, getpid, setpgid, tcsetpgrp},
+};
 use std::{
     env::{self},
     ffi::CString,
@@ -8,19 +23,6 @@ use std::{
     },
     path::{Path, PathBuf},
     process::exit,
-};
-
-use nix::{
-    errno::Errno,
-    sys::{
-        signal::{
-            SaFlags, SigAction, SigSet,
-            Signal::{self, SIGINT, SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU},
-            sigaction,
-        },
-        wait::waitpid,
-    },
-    unistd::{ForkResult, Pid, execv, fork, getpgrp, getpid, setpgid, tcsetpgrp},
 };
 
 struct Commands;
@@ -120,6 +122,7 @@ fn handle_non_builtins(
     tty: std::os::fd::BorrowedFd<'_>,
     command: &str,
     args: &[String],
+    redirects: Vec<lexer::Redirect>,
 ) {
     if let Some(full_path) = is_command_in_paths_env(command) {
         match unsafe { fork() } {
@@ -168,11 +171,46 @@ fn handle_non_builtins(
                     let other_argv = match CString::new(arg.as_bytes()) {
                         Ok(c) => c,
                         Err(_) => {
-                            eprintln!("Pid: {}, invalid argument (contains NUL)", pid);
+                            eprintln!("Pid: {}, invalid argument (contains NULL)", pid);
                             exit(1);
                         }
                     };
                     args_for_new_proc.push(other_argv);
+                }
+                let default_flags = OFlag::O_WRONLY | OFlag::O_CREAT;
+                let file_mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
+                for redirect in redirects {
+                    let flags = default_flags
+                        | (if redirect.append {
+                            OFlag::O_APPEND
+                        } else {
+                            OFlag::O_TRUNC
+                        });
+                    let redirect_fd =
+                        match nix::fcntl::open(redirect.path.as_str(), flags, file_mode) {
+                            Ok(fd) => fd,
+                            Err(e) => {
+                                eprintln!(
+                                    "Pid: {}, Couldnt open file: {}(Code: {})",
+                                    pid,
+                                    e.desc(),
+                                    e as i32
+                                );
+                                exit(1);
+                            }
+                        };
+                    match unsafe { nix::unistd::dup2_raw(&redirect_fd, redirect.fd as i32) } {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "Pid: {}, Couldnt dup2: {}(Code: {})",
+                                pid,
+                                e.desc(),
+                                e as i32
+                            );
+                            exit(1);
+                        }
+                    }
                 }
                 match execv(&full_path, &args_for_new_proc) {
                     Ok(_) => unreachable!(),
@@ -255,10 +293,10 @@ fn main() {
         match stdin_handle.read_line(&mut stdin_buffer) {
             Ok(0) => break,
             Ok(_) => {
-                let tokens = tokenize(&stdin_buffer);
-                if !tokens.is_empty() {
-                    let command = tokens[0].as_str();
-                    let args = &tokens[1..];
+                let parsed_command = lexer::tokenize(&stdin_buffer);
+                if !parsed_command.command.is_empty() {
+                    let command = parsed_command.command.as_str();
+                    let args = &parsed_command.args;
                     match command {
                         Commands::EXIT => break,
                         Commands::ECHO => println!("{}", args.join(" ")),
@@ -270,7 +308,13 @@ fn main() {
                         Commands::CD => {
                             handle_cd_command(args.first().map(|s| s.as_str()).unwrap_or(&"~"))
                         }
-                        _ => handle_non_builtins(shell_pgid, stdin_handle.as_fd(), command, &args),
+                        _ => handle_non_builtins(
+                            shell_pgid,
+                            stdin_handle.as_fd(),
+                            command,
+                            &args,
+                            parsed_command.redirects,
+                        ),
                     }
                 }
                 stdin_buffer.clear();
@@ -280,44 +324,4 @@ fn main() {
             }
         }
     }
-}
-
-fn tokenize(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current_token = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut is_escaped = false;
-    let mut characters = input.chars().peekable();
-
-    // println!("Chars: {:?}", characters);
-
-    while let Some(c) = characters.next() {
-        match c {
-            '\\' if !(in_single_quote || is_escaped) => is_escaped = true,
-            '\n' => {}
-            '\'' if !(is_escaped || in_double_quote) => {
-                in_single_quote = !in_single_quote;
-            }
-            '\"' if !(is_escaped || in_single_quote) => {
-                in_double_quote = !in_double_quote;
-            }
-            ' ' | '\t' if !(is_escaped || in_single_quote || in_double_quote) => {
-                if !current_token.is_empty() {
-                    tokens.push(current_token);
-                    current_token = String::new();
-                }
-            }
-            _ => {
-                current_token.push(c);
-                is_escaped = false;
-            }
-        }
-    }
-
-    if !current_token.is_empty() {
-        tokens.push(current_token);
-    }
-    // println!("Tokens: {:?}", tokens);
-    tokens
 }
