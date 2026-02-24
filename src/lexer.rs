@@ -89,7 +89,7 @@ pub fn tokenize(input: &str) -> ParsedCommand {
     if !current_token.is_empty() {
         build_parsed_command(&mut parsed_command, current_token, &mut pending_redirect);
     }
-    println!("Tokens: {:?}", parsed_command);
+    // println!("Tokens: {:?}", parsed_command);
     parsed_command
 }
 
