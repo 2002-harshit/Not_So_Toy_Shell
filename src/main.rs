@@ -20,7 +20,7 @@ use std::{
     ffi::CString,
     io::{BufRead, Write, stderr, stdout},
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
+        fd::{AsFd, AsRawFd, OwnedFd},
         unix::{ffi::OsStrExt, fs::PermissionsExt},
     },
     path::{Path, PathBuf},
