@@ -11,14 +11,16 @@ use nix::{
         stat::Mode,
         wait::waitpid,
     },
-    unistd::{ForkResult, Pid, execv, fork, getpgrp, getpid, setpgid, tcsetpgrp},
+    unistd::{
+        ForkResult, Pid, dup2_stderr, dup2_stdout, execv, fork, getpgrp, getpid, setpgid, tcsetpgrp,
+    },
 };
 use std::{
     env::{self},
     ffi::CString,
-    io::{BufRead, Write, stdout},
+    io::{BufRead, Write, stderr, stdout},
     os::{
-        fd::AsFd,
+        fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
         unix::{ffi::OsStrExt, fs::PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -177,40 +179,9 @@ fn handle_non_builtins(
                     };
                     args_for_new_proc.push(other_argv);
                 }
-                let default_flags = OFlag::O_WRONLY | OFlag::O_CREAT;
-                let file_mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
-                for redirect in redirects {
-                    let flags = default_flags
-                        | (if redirect.append {
-                            OFlag::O_APPEND
-                        } else {
-                            OFlag::O_TRUNC
-                        });
-                    let redirect_fd =
-                        match nix::fcntl::open(redirect.path.as_str(), flags, file_mode) {
-                            Ok(fd) => fd,
-                            Err(e) => {
-                                eprintln!(
-                                    "Pid: {}, Couldnt open file: {}(Code: {})",
-                                    pid,
-                                    e.desc(),
-                                    e as i32
-                                );
-                                exit(1);
-                            }
-                        };
-                    match unsafe { nix::unistd::dup2_raw(&redirect_fd, redirect.fd as i32) } {
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!(
-                                "Pid: {}, Couldnt dup2: {}(Code: {})",
-                                pid,
-                                e.desc(),
-                                e as i32
-                            );
-                            exit(1);
-                        }
-                    }
+                if let Ok(_kept_alive_fds) = setup_redirects(redirects) {
+                } else {
+                    exit(1);
                 }
                 match execv(&full_path, &args_for_new_proc) {
                     Ok(_) => unreachable!(),
@@ -267,6 +238,63 @@ fn handle_non_builtins(
     }
 }
 
+fn setup_redirects(redirects: Vec<lexer::Redirect>) -> Result<Vec<OwnedFd>, ()> {
+    let default_flags = OFlag::O_WRONLY | OFlag::O_CREAT;
+    let file_mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
+    let mut keep_alive_fds = vec![];
+    for redirect in redirects {
+        let flags = default_flags
+            | (if redirect.append {
+                OFlag::O_APPEND
+            } else {
+                OFlag::O_TRUNC
+            });
+        let new_fd = match nix::fcntl::open(redirect.path.as_str(), flags, file_mode) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("Couldnt open file: {}(Code: {})", e.desc(), e as i32);
+                return Err(());
+            }
+        };
+        let dup2_error_closure = |e: Errno| {
+            eprintln!("Couldnt dup2: {}(Code: {})", e.desc(), e as i32);
+            return Err(());
+        };
+        match redirect.fd {
+            0 => return Err(()),
+            1 => match dup2_stdout(new_fd) {
+                Ok(_) => {}
+                Err(e) => return dup2_error_closure(e),
+            },
+            2 => match dup2_stderr(new_fd) {
+                Ok(_) => {}
+                Err(e) => return dup2_error_closure(e),
+            },
+            _ => match unsafe { nix::unistd::dup2_raw(new_fd, redirect.fd as i32) } {
+                Ok(new_redirect_fd) => {
+                    keep_alive_fds.push(new_redirect_fd);
+                }
+                Err(e) => return dup2_error_closure(e),
+            },
+        }
+    }
+    return Ok(keep_alive_fds);
+}
+
+fn restore_fds(stdout_copy: Option<OwnedFd>, stderr_copy: Option<OwnedFd>) -> Result<(), ()> {
+    if let Some(stdout_fd) = stdout_copy {
+        if let Err(_) = dup2_stdout(stdout_fd) {
+            return Err(());
+        }
+    }
+    if let Some(stderr_fd) = stderr_copy {
+        if let Err(_) = dup2_stderr(stderr_fd) {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     /* ignoring some signals */
     let sa = SigAction::new(
@@ -285,8 +313,7 @@ fn main() {
     let mut stdin_buffer = String::new();
     loop {
         print!("$ ");
-        let flush_stdout = stdout().flush();
-        if let Err(e) = flush_stdout {
+        if let Err(e) = stdout().flush() {
             eprintln!("Error flushing stdout: {}", e);
             return;
         }
@@ -297,24 +324,67 @@ fn main() {
                 if !parsed_command.command.is_empty() {
                     let command = parsed_command.command.as_str();
                     let args = &parsed_command.args;
-                    match command {
-                        Commands::EXIT => break,
-                        Commands::ECHO => println!("{}", args.join(" ")),
-                        Commands::TYPE => handle_type_command(&args),
-                        Commands::PWD => match env::current_dir() {
-                            Ok(c) => println!("{}", c.display()),
-                            Err(e) => eprintln!("Error with pwd {}", e),
-                        },
-                        Commands::CD => {
-                            handle_cd_command(args.first().map(|s| s.as_str()).unwrap_or(&"~"))
+                    if is_builtin(&command) {
+                        let mut stdout_copy = None;
+                        let mut stderr_copy = None;
+                        let did_redirect_stdout = parsed_command
+                            .redirects
+                            .iter()
+                            .any(|r| r.fd == stdout().as_raw_fd() as u32);
+                        let did_redirect_stderr = parsed_command
+                            .redirects
+                            .iter()
+                            .any(|r| r.fd == stderr().as_raw_fd() as u32);
+                        if did_redirect_stdout {
+                            stdout_copy = match nix::unistd::dup(stdout().as_fd()) {
+                                Ok(stdout_copy) => Some(stdout_copy),
+                                Err(_) => {
+                                    eprintln!("Couldnt dup stdout");
+                                    continue;
+                                }
+                            }
                         }
-                        _ => handle_non_builtins(
+                        if did_redirect_stderr {
+                            stderr_copy = match nix::unistd::dup(stderr().as_fd()) {
+                                Ok(stderr_copy) => Some(stderr_copy),
+                                Err(_) => {
+                                    eprintln!("Couldnt dup stderr");
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Err(_) = setup_redirects(parsed_command.redirects) {
+                            if let Err(_) = restore_fds(stdout_copy, stderr_copy) {
+                                eprintln!("Couldnt restore fds");
+                                break;
+                            }
+                            continue;
+                        }
+                        match command {
+                            Commands::EXIT => break,
+                            Commands::ECHO => println!("{}", args.join(" ")),
+                            Commands::TYPE => handle_type_command(&args),
+                            Commands::PWD => match env::current_dir() {
+                                Ok(c) => println!("{}", c.display()),
+                                Err(e) => eprintln!("Error with pwd {}", e),
+                            },
+                            Commands::CD => {
+                                handle_cd_command(args.first().map(|s| s.as_str()).unwrap_or(&"~"))
+                            }
+                            _ => unreachable!(),
+                        }
+                        if let Err(_) = restore_fds(stdout_copy, stderr_copy) {
+                            eprintln!("Couldnt restore fds");
+                            break;
+                        }
+                    } else {
+                        handle_non_builtins(
                             shell_pgid,
                             stdin_handle.as_fd(),
                             command,
                             &args,
                             parsed_command.redirects,
-                        ),
+                        );
                     }
                 }
                 stdin_buffer.clear();

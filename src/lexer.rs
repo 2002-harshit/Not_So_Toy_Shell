@@ -36,11 +36,11 @@ pub fn tokenize(input: &str) -> ParsedCommand {
                 } else {
                     if !current_token.is_empty() {
                         if parsed_command.command.is_empty() {
-                            parsed_command.command = current_token.clone();
+                            parsed_command.command = current_token;
                         } else {
-                            parsed_command.args.push(current_token.clone());
+                            parsed_command.args.push(current_token);
                         }
-                        current_token.clear();
+                        current_token = String::new();
                     }
                     1
                 };
@@ -75,11 +75,8 @@ pub fn tokenize(input: &str) -> ParsedCommand {
             }
             ' ' | '\t' if !(is_escaped || in_single_quote || in_double_quote) => {
                 if !current_token.is_empty() {
-                    build_parsed_command(
-                        &mut parsed_command,
-                        &mut current_token,
-                        &mut pending_redirect,
-                    );
+                    build_parsed_command(&mut parsed_command, current_token, &mut pending_redirect);
+                    current_token = String::new();
                 }
             }
             _ => {
@@ -90,31 +87,26 @@ pub fn tokenize(input: &str) -> ParsedCommand {
     }
 
     if !current_token.is_empty() {
-        build_parsed_command(
-            &mut parsed_command,
-            &mut current_token,
-            &mut pending_redirect,
-        );
+        build_parsed_command(&mut parsed_command, current_token, &mut pending_redirect);
     }
-    // println!("Tokens: {:?}", parsed_command);
+    println!("Tokens: {:?}", parsed_command);
     parsed_command
 }
 
 fn build_parsed_command(
     parsed_command: &mut ParsedCommand,
-    current_token: &mut String,
+    current_token: String,
     pending_redirect: &mut Option<(u32, bool)>,
 ) {
     if let Some((fd, append)) = pending_redirect.take() {
         parsed_command.redirects.push(Redirect {
             fd,
-            path: current_token.clone(),
+            path: current_token,
             append,
         });
     } else if parsed_command.command.is_empty() {
-        parsed_command.command = current_token.clone();
+        parsed_command.command = current_token;
     } else {
-        parsed_command.args.push(current_token.clone());
+        parsed_command.args.push(current_token);
     }
-    current_token.clear();
 }
