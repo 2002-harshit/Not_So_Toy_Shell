@@ -10,3 +10,5 @@ target/
 *.pdb
 
 zsh/
+.codecrafters
+codecrafters.yml
